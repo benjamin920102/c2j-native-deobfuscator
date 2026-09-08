@@ -6,27 +6,91 @@ on:
 jobs:
   build-cli:
     runs-on: windows-latest
+
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
+          architecture: x64
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          architecture: x64
+          set-default: false
+
+      - name: Configure Gradle Java toolchains
+        shell: powershell
+        run: |
+          Write-Host "JAVA_HOME = $env:JAVA_HOME"
+          Write-Host "JAVA_HOME_17_X64 = $env:JAVA_HOME_17_X64"
+          Write-Host "JAVA_HOME_21_X64 = $env:JAVA_HOME_21_X64"
+
+          Write-Host "=== Java 17 ==="
+          & "$env:JAVA_HOME_17_X64\bin\java.exe" -version
+          & "$env:JAVA_HOME_17_X64\bin\javac.exe" -version
+
+          Write-Host "=== Java 21 ==="
+          & "$env:JAVA_HOME_21_X64\bin\java.exe" -version
+          & "$env:JAVA_HOME_21_X64\bin\javac.exe" -version
+
+          $jdk17 = $env:JAVA_HOME_17_X64.Replace('\', '/')
+          $jdk21 = $env:JAVA_HOME_21_X64.Replace('\', '/')
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$env:USERPROFILE\.gradle" | Out-Null
+
+          @"
+          org.gradle.java.installations.auto-detect=true
+          org.gradle.java.installations.auto-download=false
+          org.gradle.java.installations.paths=$jdk17,$jdk21
+          "@ | Set-Content "$env:USERPROFILE\.gradle\gradle.properties"
+
+          Write-Host ""
+          Write-Host "=== ~/.gradle/gradle.properties ==="
+          Get-Content "$env:USERPROFILE\.gradle\gradle.properties"
+
+      - name: Check Gradle
+        working-directory: jvm
+        shell: powershell
+        run: |
+          .\gradlew.bat --version
+          .\gradlew.bat javaToolchains --no-daemon
 
       - name: Build CLI distributions
         working-directory: jvm
+        shell: powershell
         run: .\gradlew.bat installDist --no-daemon
 
       - name: Archive entire project without .git
         shell: powershell
         run: |
           New-Item -ItemType Directory -Path "dist_package" -Force
-          Get-ChildItem -Path . -Force | Where-Object { $_.Name -ne ".git" -and $_.Name -ne "dist_package" -and $_.Name -ne "project.zip" } | Copy-Item -Destination "dist_package" -Recurse -Force
-          Compress-Archive -Path "dist_package\*" -DestinationPath "c2j-native-deobfuscator.zip"
+
+          Get-ChildItem -Path . -Force |
+            Where-Object {
+              $_.Name -ne ".git" -and
+              $_.Name -ne "dist_package" -and
+              $_.Name -ne "project.zip" -and
+              $_.Name -ne "c2j-native-deobfuscator.zip"
+            } |
+            Copy-Item -Destination "dist_package" -Recurse -Force
+
+          Compress-Archive `
+            -Path "dist_package\*" `
+            -DestinationPath "c2j-native-deobfuscator.zip"
 
       - name: Generate Tag Name
         id: tag
