@@ -1,141 +1,186 @@
-name: Setup and package four platforms
+name: Build prebuilt DLL/SO agents only
 
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
 
 permissions:
   contents: write
 
 jobs:
-  setup-package:
-    name: Setup ${{ matrix.platform }}
+  build-native:
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-arm64
-            runner: windows-11-arm
-            msvc_arch: amd64_arm64
-            arch: arm64
-            agent: j2c_agent.dll
-          - platform: windows-x64
-            runner: windows-2022
-            msvc_arch: amd64
+          - platform: windows
             arch: x64
-            agent: j2c_agent.dll
-          - platform: ubuntu-arm64
-            runner: ubuntu-24.04-arm
+            runner: windows-latest
+            target: x86_64-windows-gnu
+            output: j2c_agent-windows-x64.dll
+
+          - platform: windows
             arch: arm64
-            agent: j2c_agent.so
-          - platform: ubuntu-x64
-            runner: ubuntu-24.04
+            runner: windows-latest
+            target: aarch64-windows-gnu
+            output: j2c_agent-windows-arm64.dll
+
+          - platform: linux
             arch: x64
-            agent: j2c_agent.so
-    env:
-      J2C_ARCH: ${{ matrix.arch }}
-      UV_PYTHON: '3.13'
-      UV_LINK_MODE: copy
-      UV_PYTHON_DOWNLOADS: never
+            runner: ubuntu-latest
+            target: x86_64-linux-gnu
+            output: j2c_agent-linux-x64.so
+
+          - platform: linux
+            arch: arm64
+            runner: ubuntu-latest
+            target: aarch64-linux-gnu
+            output: j2c_agent-linux-arm64.so
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Java 21
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 headers
         uses: actions/setup-java@v4
         with:
-          distribution: zulu
+          distribution: temurin
           java-version: '21'
-          architecture: ${{ matrix.arch }}
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-          architecture: ${{ matrix.arch }}
-      - name: Install uv
-        run: python -m pip install uv
-      - name: Check packaging rules
-        run: python -m unittest discover -s scripts/tests
+          architecture: x64
+
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Select Git Bash on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $git = (Get-Command git.exe).Source
-          $gitRoot = Split-Path (Split-Path $git -Parent) -Parent
-          $bashDir = Join-Path $gitRoot 'bin'
-          if (-not (Test-Path (Join-Path $bashDir 'bash.exe'))) {
-            throw "Git Bash missing under $gitRoot"
-          }
-          $bashDir >> $env:GITHUB_PATH
-      # Capstone may need a source build on Windows ARM64. Its Python build
-      # uses CMake/NMake, which requires the MSVC environment and target SDK.
-      - name: Set up Windows C/C++ compiler
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.msvc_arch }}
-      - name: Check Windows native build tools
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          foreach ($tool in @('cmake.exe', 'nmake.exe', 'cl.exe', 'link.exe')) {
-            $command = Get-Command $tool -ErrorAction Stop
-            Write-Host "$tool -> $($command.Source)"
-          }
-          if ($env:VSCMD_ARG_TGT_ARCH -ne $env:J2C_ARCH) {
-            throw "MSVC target '$env:VSCMD_ARG_TGT_ARCH' does not match '$env:J2C_ARCH'"
-          }
-      - name: Run complete Windows setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/setup.ps1 -Force
-      - name: Run complete Ubuntu setup
-        if: runner.os == 'Linux'
-        shell: bash
-        run: bash scripts/setup.sh --force
-      - name: Verify setup and archive entire project
-        env:
-          PACKAGE_PLATFORM: ${{ matrix.platform }}
-          PACKAGE_AGENT: ${{ matrix.agent }}
-        run: python scripts/package_setup.py
-      - name: Upload platform ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: c2j-${{ matrix.platform }}
-          path: ${{ runner.temp }}/c2j-packages/*.zip
-          if-no-files-found: error
-          compression-level: 0
 
-  release:
-    name: Publish four ZIPs as pre-release
-    needs: setup-package
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: c2j-*
-          path: release-assets
-          merge-multiple: true
-      - name: Check four packages
+      - name: Build Windows DLL
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path native-out | Out-Null
+
+          $output = Join-Path 'native-out' '${{ matrix.output }}'
+          $zigArgs = @(
+            'c++',
+            '-target', '${{ matrix.target }}',
+            '-std=c++17',
+            '-O2',
+            '-DNDEBUG',
+            '-shared',
+            '-Wno-nullability-completeness',
+            "-I$env:JAVA_HOME\include",
+            "-I$env:JAVA_HOME\include\win32",
+            '-Inative\include',
+            '-o', $output,
+            'native\src\agent.cpp',
+            'native\src\trace_writer.cpp',
+            'native\src\jni_hook.cpp'
+          )
+
+          & zig @zigArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          if (-not (Test-Path $output)) {
+            throw "Expected output was not created: $output"
+          }
+          if ((Get-Item $output).Length -eq 0) {
+            throw "Output file is empty: $output"
+          }
+
+          Get-Item $output | Format-List Name,Length,FullName
+
+      - name: Build Linux SO
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
-          for platform in windows-arm64 windows-x64 ubuntu-arm64 ubuntu-x64; do
-            test -s "release-assets/c2j-native-deobfuscator-$platform.zip"
+          mkdir -p native-out
+
+          zig c++ \
+            -target '${{ matrix.target }}' \
+            -std=c++17 \
+            -O2 \
+            -DNDEBUG \
+            -shared \
+            -fPIC \
+            -Wno-nullability-completeness \
+            -I "$JAVA_HOME/include" \
+            -I "$JAVA_HOME/include/linux" \
+            -I native/include \
+            -o 'native-out/${{ matrix.output }}' \
+            native/src/agent.cpp \
+            native/src/trace_writer.cpp \
+            native/src/jni_hook.cpp
+
+          test -s 'native-out/${{ matrix.output }}'
+          ls -lh 'native-out/${{ matrix.output }}'
+          file 'native-out/${{ matrix.output }}'
+
+      - name: Upload native agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}-${{ matrix.arch }}
+          path: native-out/${{ matrix.output }}
+          if-no-files-found: error
+
+  release:
+    name: Publish four native agents
+    needs: build-native
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected=(
+            j2c_agent-windows-x64.dll
+            j2c_agent-windows-arm64.dll
+            j2c_agent-linux-x64.so
+            j2c_agent-linux-arm64.so
+          )
+
+          for filename in "${expected[@]}"; do
+            if [[ ! -s "release-assets/$filename" ]]; then
+              echo "ERROR: missing or empty release-assets/$filename" >&2
+              exit 1
+            fi
           done
-      - name: Publish pre-release
+
+          count=$(find release-assets -type f | wc -l)
+          if [[ "$count" -ne 4 ]]; then
+            echo "ERROR: expected exactly 4 files, got $count" >&2
+            exit 1
+          fi
+
+          ls -lh release-assets
+
+      - name: Generate tag name
+        id: tag
+        shell: bash
+        run: |
+          echo "TAG_NAME=native-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: setup-${{ github.run_id }}-${{ github.run_attempt }}
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
           target_commitish: ${{ github.sha }}
-          name: Setup packages (${{ github.run_number }})
+          name: "Prebuilt Agents (${{ steps.tag.outputs.TAG_NAME }})"
           prerelease: true
           fail_on_unmatched_files: true
-          files: release-assets/*.zip
+          files: |
+            release-assets/j2c_agent-windows-x64.dll
+            release-assets/j2c_agent-windows-arm64.dll
+            release-assets/j2c_agent-linux-x64.so
+            release-assets/j2c_agent-linux-arm64.so
