@@ -354,6 +354,43 @@ scripts/j2c recover \
 > 本文写作 `py/.venv/bin/python`（Windows 上为 `py\.venv\Scripts\python`）。如果
 > setup 走的是 `pip` 兜底，就换成它安装到的那个解释器。
 
+### 只记录指定类（`include`）
+
+使用支持 `include` 选项的 agent 版本时，可以在 JVM 启动参数中指定类名模式，
+缩小记录范围，减少 `trace.jsonl` 的大小。例如，只选择 `obf.*` 和 `native.*`：
+
+```text
+-agentpath:C:\Users\Library\Downloads\j2c_agent-windows-x64.dll=trace=C:\c2j\trace.jsonl,include=obf.*;native.*
+```
+
+把整个参数放入启动器的 **JVM 参数**栏，位置在主类或 `-jar` 参数之前。
+请将 DLL 与输出路径替换为实际路径，并在启动前创建 `C:\c2j` 目录。
+DLL 必须与 JVM 的架构一致（Windows x64 JVM 使用 `windows-x64` DLL）。
+
+如果直接在 PowerShell 中启动，需要给整个 `-agentpath` 参数加引号，
+因为 PowerShell 会将未加引号的分号当作命令分隔符：
+
+```powershell
+New-Item -ItemType Directory -Force 'C:\c2j' | Out-Null
+java '-agentpath:C:\Users\Library\Downloads\j2c_agent-windows-x64.dll=trace=C:\c2j\trace.jsonl,include=obf.*;native.*' -jar 'C:\path\to\target.jar'
+```
+
+| 参数片段 | 含义 |
+| --- | --- |
+| `trace=C:\c2j\trace.jsonl` | trace 输出文件。 |
+| `include=obf.*;native.*` | 选择匹配任意一个模式的类。 |
+| `obf.*` | 类名以 `obf` 包路径开头的类。 |
+| `native.*` | 类名以 `native` 包路径开头的类。 |
+| `,` | 分隔不同的 agent 选项，例如 `trace` 和 `include`。 |
+| `;` | 分隔 `include` 中的多个模式。 |
+
+筛选会缩小本次 trace 可用于恢复的范围；请包含需要追踪的所有类，
+并在运行时实际触发需要记录的代码路径。
+
+**版本兼容性：** 本源码快照中的 `native/src/agent.cpp` 尚未解析 `include`，
+未知选项会被忽略。因此，上述用法需要使用已实现类筛选功能的版本构建出的 DLL。
+仅给旧 DLL 添加此参数不会启用筛选。本次 README 修改不包含筛选实现或重新编译的 DLL。
+
 ### 进程附加（预览 —— 可选、仅限同一用户）
 
 如果目标 JVM 是你自己的、且已经在运行、无法重启，可以把同一个 JVMTI agent
