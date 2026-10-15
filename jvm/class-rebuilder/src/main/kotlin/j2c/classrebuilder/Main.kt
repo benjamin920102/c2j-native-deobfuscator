@@ -59,10 +59,31 @@ class ClassRebuilderCmd : Callable<Int> {
     )
     var allowUnverifiedClasses: Boolean = true
 
+    @Option(names = ["--analysis-only"], description = ["Allow incomplete output for decompilation; not a runnable mod"])
+    var analysisOnly = false
+
     override fun call(): Int {
         val loaderCfg = detectLoaderConfig()
         val recovered = RecoveredIndex.loadDir(recoveredDir)
         System.err.println("Loaded ${recovered.size()} recovered methods")
+        val missing = mutableListOf<String>()
+        JarFile(input.toFile()).use { jar ->
+            val entries = jar.entries()
+            while (entries.hasMoreElements()) {
+                val e = entries.nextElement()
+                if (!e.name.endsWith(".class")) continue
+                val cn = ClassNode()
+                ClassReader(jar.getInputStream(e).use { it.readBytes() }).accept(cn, ClassReader.SKIP_CODE)
+                if (cn.name == loaderCfg.loaderClass) continue
+                for (m in cn.methods) if ((m.access and Opcodes.ACC_NATIVE) != 0 &&
+                    recovered.lookup(cn.name, m.name, m.desc) == null) missing += "${cn.name}.${m.name}${m.desc}"
+            }
+        }
+        if (!analysisOnly && (recovered.size() == 0 || missing.isNotEmpty())) {
+            System.err.println("Rebuild refused: ${missing.size} native methods have no recovered body. No output written. Use --analysis-only only for decompilation.")
+            return 2
+        }
+        if (analysisOnly) System.err.println("ANALYSIS ONLY: native loader/libraries may be removed; output is not a runnable mod")
         val rebuilder = ClassRebuilder(
             loaderCfg, recovered,
             annotateRuntimeValues = annotateRuntimeValues,

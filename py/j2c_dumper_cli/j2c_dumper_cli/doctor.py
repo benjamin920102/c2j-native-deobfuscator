@@ -244,6 +244,9 @@ def check_python_recover_deps(root: Optional[Path] = None) -> Check:
 
 def _jvm_install_script(root: Path, module: str) -> Path:
     suffix = ".bat" if os.name == "nt" else ""
+    packaged = root / "prebuilt" / "jvm" / "bin" / f"{module}{suffix}"
+    if os.environ.get("J2C_USE_BUILT_JVM") != "1" and packaged.exists() and (packaged.parent.parent / "c2j-reference-tools.jar").exists():
+        return packaged
     return root / "jvm" / module / "build" / "install" / module / "bin" / f"{module}{suffix}"
 
 

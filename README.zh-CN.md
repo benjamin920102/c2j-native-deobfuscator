@@ -1,3 +1,5 @@
+> JNI reference/owner fix: see [START-HERE-REFERENCE-FIX.zh-TW.md](START-HERE-REFERENCE-FIX.zh-TW.md). Includes Java 21 tools and an updated Windows x64 agent.
+
 [English](README.md) | **中文**
 
 # c2j-native-deobfuscator

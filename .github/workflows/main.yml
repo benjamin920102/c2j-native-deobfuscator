@@ -1,312 +1,119 @@
-name: Build CLI + separate prebuilt DLL/SO agents
+name: Setup and package four platforms
 
 on:
   workflow_dispatch:
+  push:
+    tags: ['v*']
 
 permissions:
   contents: write
 
 jobs:
-  build-cli:
-    name: Build original CLI ZIP
-    runs-on: ubuntu-latest
-
+  setup-package:
+    name: Setup ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-arm64
+            runner: windows-11-arm
+            arch: arm64
+            agent: j2c_agent.dll
+          - platform: windows-x64
+            runner: windows-2022
+            arch: x64
+            agent: j2c_agent.dll
+          - platform: ubuntu-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            agent: j2c_agent.so
+          - platform: ubuntu-x64
+            runner: ubuntu-24.04
+            arch: x64
+            agent: j2c_agent.so
+    env:
+      J2C_ARCH: ${{ matrix.arch }}
+      UV_PYTHON: '3.13'
+      UV_LINK_MODE: copy
+      UV_PYTHON_DOWNLOADS: never
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: zulu
           java-version: '21'
-          architecture: x64
-          cache: gradle
-
-      - name: Build CLI distributions
-        working-directory: jvm
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x gradlew
-          ./gradlew test installDist --no-daemon -Porg.gradle.java.installations.auto-download=false
-
-      - name: Archive original project ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -f c2j-native-deobfuscator.zip
-
-          zip -r c2j-native-deobfuscator.zip . \
-            -x '.git/*' \
-               '.git' \
-               'prebuilt/*' \
-               'prebuilt' \
-               'c2j-native-deobfuscator.zip'
-
-          unzip -l c2j-native-deobfuscator.zip | tail -n 20
-
-      - name: Upload original project ZIP
-        uses: actions/upload-artifact@v4
+          architecture: ${{ matrix.arch }}
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
-          name: cli-release-zip
-          path: c2j-native-deobfuscator.zip
-          if-no-files-found: error
-
-  # Each architecture is built in its own matrix job and uploaded as its own
-  # artifact. No architecture can overwrite another architecture's file.
-  build-native-windows:
-    name: Windows DLL (${{ matrix.arch }})
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            target: x86_64-windows-gnu
-            output: j2c_agent-windows-x64.dll
-          - arch: arm64
-            target: aarch64-windows-gnu
-            output: j2c_agent-windows-arm64.dll
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java 21 headers
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-          architecture: x64
-
+          python-version: '3.13'
+          architecture: ${{ matrix.arch }}
+      - name: Install uv
+        run: python -m pip install uv
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-
-      - name: Build ${{ matrix.arch }} DLL
+      - name: Select Git Bash on Windows
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path native-out | Out-Null
-
-          $output = Join-Path 'native-out' '${{ matrix.output }}'
-          $args = @(
-            'c++',
-            '-target', '${{ matrix.target }}',
-            '-std=c++17',
-            '-O2',
-            '-DNDEBUG',
-            '-shared',
-            '-Wno-nullability-completeness',
-            "-I$env:JAVA_HOME\include",
-            "-I$env:JAVA_HOME\include\win32",
-            '-Inative\include',
-            '-o', $output,
-            'native\src\agent.cpp',
-            'native\src\trace_writer.cpp',
-            'native\src\jni_hook.cpp'
-          )
-
-          & zig @args
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          if (-not (Test-Path $output)) {
-            throw "Expected output was not created: $output"
+          $git = (Get-Command git.exe).Source
+          $gitRoot = Split-Path (Split-Path $git -Parent) -Parent
+          $bashDir = Join-Path $gitRoot 'bin'
+          if (-not (Test-Path (Join-Path $bashDir 'bash.exe'))) {
+            throw "Git Bash missing under $gitRoot"
           }
-
-          Get-Item $output | Format-List Name,Length,FullName
-
-      - name: Upload ${{ matrix.arch }} DLL
+          $bashDir >> $env:GITHUB_PATH
+      - name: Run complete Windows setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/setup.ps1 -Force
+      - name: Run complete Ubuntu setup
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/setup.sh --force
+      - name: Verify setup and archive entire project
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+          PACKAGE_AGENT: ${{ matrix.agent }}
+        run: python scripts/package_setup.py
+      - name: Upload platform ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: native-windows-${{ matrix.arch }}
-          path: native-out/${{ matrix.output }}
+          name: c2j-${{ matrix.platform }}
+          path: ${{ runner.temp }}/c2j-packages/*.zip
           if-no-files-found: error
-
-  build-native-linux:
-    name: Linux SO (${{ matrix.arch }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            target: x86_64-linux-gnu
-            output: j2c_agent-linux-x64.so
-          - arch: arm64
-            target: aarch64-linux-gnu
-            output: j2c_agent-linux-arm64.so
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java 21 headers
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-          architecture: x64
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - name: Build ${{ matrix.arch }} SO
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p native-out
-
-          zig c++ \
-            -target '${{ matrix.target }}' \
-            -std=c++17 \
-            -O2 \
-            -DNDEBUG \
-            -shared \
-            -fPIC \
-            -Wno-nullability-completeness \
-            -I "$JAVA_HOME/include" \
-            -I "$JAVA_HOME/include/linux" \
-            -I native/include \
-            -o 'native-out/${{ matrix.output }}' \
-            native/src/agent.cpp \
-            native/src/trace_writer.cpp \
-            native/src/jni_hook.cpp
-
-          test -f 'native-out/${{ matrix.output }}'
-          ls -lh 'native-out/${{ matrix.output }}'
-          file 'native-out/${{ matrix.output }}' || true
-
-      - name: Upload ${{ matrix.arch }} SO
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-linux-${{ matrix.arch }}
-          path: native-out/${{ matrix.output }}
-          if-no-files-found: error
-
-  # Download all 4 architecture-specific artifacts and package ONLY the native
-  # files into prebuilt_dll_so.zip.
-  package-prebuilt:
-    name: Package prebuilt_dll_so.zip
-    needs:
-      - build-native-windows
-      - build-native-linux
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download all native artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: native-*
-          path: incoming
-          merge-multiple: true
-
-      - name: Verify downloaded native files
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo 'Downloaded files:'
-          find incoming -maxdepth 2 -type f -print | sort
-
-          expected=(
-            j2c_agent-windows-x64.dll
-            j2c_agent-windows-arm64.dll
-            j2c_agent-linux-x64.so
-            j2c_agent-linux-arm64.so
-          )
-
-          for file in "${expected[@]}"; do
-            if [[ ! -f "incoming/$file" ]]; then
-              echo "ERROR: missing incoming/$file" >&2
-              exit 1
-            fi
-          done
-
-          count=$(find incoming -maxdepth 1 -type f \( -name '*.dll' -o -name '*.so' \) | wc -l)
-          if [[ "$count" -ne 4 ]]; then
-            echo "ERROR: expected exactly 4 native files, got $count" >&2
-            exit 1
-          fi
-
-      - name: Create prebuilt_dll_so.zip
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p \
-            prebuilt/windows/x64 \
-            prebuilt/windows/arm64 \
-            prebuilt/linux/x64 \
-            prebuilt/linux/arm64
-
-          cp incoming/j2c_agent-windows-x64.dll   prebuilt/windows/x64/j2c_agent.dll
-          cp incoming/j2c_agent-windows-arm64.dll prebuilt/windows/arm64/j2c_agent.dll
-
-          cp incoming/j2c_agent-linux-x64.so      prebuilt/linux/x64/j2c_agent.so
-          cp incoming/j2c_agent-linux-arm64.so    prebuilt/linux/arm64/j2c_agent.so
-
-          echo 'Final prebuilt tree:'
-          find prebuilt -type f -print | sort
-
-          native_count=$(find prebuilt -type f \( -name '*.dll' -o -name '*.so' \) | wc -l)
-          if [[ "$native_count" -ne 4 ]]; then
-            echo "ERROR: prebuilt should contain exactly 4 native files, got $native_count" >&2
-            exit 1
-          fi
-
-          zip -r prebuilt_dll_so.zip prebuilt
-          unzip -l prebuilt_dll_so.zip
-
-      - name: Upload prebuilt ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: prebuilt-release-zip
-          path: prebuilt_dll_so.zip
-          if-no-files-found: error
+          compression-level: 0
 
   release:
-    name: Publish GitHub pre-release
-    needs:
-      - build-cli
-      - package-prebuilt
-    runs-on: ubuntu-latest
-
+    name: Publish four ZIPs as pre-release
+    needs: setup-package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - name: Download original project ZIP
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: cli-release-zip
+          pattern: c2j-*
           path: release-assets
-
-      - name: Download prebuilt ZIP
-        uses: actions/download-artifact@v4
-        with:
-          name: prebuilt-release-zip
-          path: release-assets
-
-      - name: Show release assets
+          merge-multiple: true
+      - name: Check four packages
         shell: bash
         run: |
           set -euo pipefail
-          ls -lh release-assets
-          test -f release-assets/c2j-native-deobfuscator.zip
-          test -f release-assets/prebuilt_dll_so.zip
-
-      - name: Generate tag name
-        id: tag
-        shell: bash
-        run: echo "TAG_NAME=cli-native-$(date +'%Y.%m.%d-%H%M')" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Pre-release
+          for platform in windows-arm64 windows-x64 ubuntu-arm64 ubuntu-x64; do
+            test -s "release-assets/c2j-native-deobfuscator-$platform.zip"
+          done
+      - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
-          name: "CLI + Prebuilt Agents Pre-release (${{ steps.tag.outputs.TAG_NAME }})"
+          tag_name: setup-${{ github.run_id }}-${{ github.run_attempt }}
+          target_commitish: ${{ github.sha }}
+          name: Setup packages (${{ github.run_number }})
           prerelease: true
-          files: |
-            release-assets/c2j-native-deobfuscator.zip
-            release-assets/prebuilt_dll_so.zip
+          fail_on_unmatched_files: true
+          files: release-assets/*.zip

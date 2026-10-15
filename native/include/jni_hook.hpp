@@ -5,6 +5,9 @@
 
 namespace j2c::jni_hook {
 
+// Use JVMTI declaring-class metadata instead of guessing JNI owners.
+void set_jvmti(jvmtiEnv* env);
+
 // Save the original JNI function table for delegation. Called from VMInit.
 void capture_original(JNIEnv* env);
 

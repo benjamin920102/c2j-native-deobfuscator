@@ -346,6 +346,8 @@ jint init_agent(JavaVM* vm, char* options, bool live_attach) {
         return JNI_ERR;
     }
 
+    hook::set_jvmti(jvmti);
+
     jvmtiPhase phase = JVMTI_PHASE_ONLOAD;
     jvmti->GetPhase(&phase);
     const char* pname = phase_name(phase);

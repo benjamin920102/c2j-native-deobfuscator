@@ -16,6 +16,8 @@ namespace j2c::jni_hook {
 namespace {
 
 const JNINativeInterface_* g_original = nullptr;
+jvmtiEnv* g_jvmti = nullptr;
+JavaVM* g_vm = nullptr;
 JNINativeInterface_* g_hooked = nullptr;
 std::once_flag g_build_flag;
 
@@ -34,11 +36,16 @@ std::unordered_map<jobject, std::string> g_str_content;
 // Cached java/lang/String class for IsInstanceOf probing.
 jclass g_string_class = nullptr;
 
+std::string read_jstring(JNIEnv* env, jobject obj);
+
 std::string lookup_string(jobject o) {
-    if (o == nullptr) return "";
-    std::lock_guard<std::mutex> g(g_str_mu);
-    auto it = g_str_content.find(o);
-    return it != g_str_content.end() ? it->second : std::string();
+    // A JNI local handle is not a durable object identity. Read the live
+    // object instead of accepting cached text from a recycled handle.
+    JNIEnv* env = nullptr;
+    if (!o || !g_original || !g_vm || g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK)
+        return {};
+    if (g_original->ExceptionCheck(env)) return {};
+    return read_jstring(env, o);
 }
 
 void register_string(jobject o, std::string s) {
@@ -237,8 +244,68 @@ std::string hex_ptr(const void* p) {
     return buf;
 }
 
+
+// JNI local handles may be recycled. Owner names are therefore read from
+// JVMTI at lookup/call time, never derived from a loadClass string argument.
+std::string class_name(jclass cls) {
+    if (!g_jvmti || !cls) return {};
+    char* sig = nullptr;
+    if (g_jvmti->GetClassSignature(cls, &sig, nullptr) != JVMTI_ERROR_NONE || !sig) return {};
+    std::string out(sig);
+    g_jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
+    if (out.size() >= 2 && out.front() == 'L' && out.back() == ';') out = out.substr(1, out.size() - 2);
+    return out;
+}
+void release_class(jclass cls) {
+    JNIEnv* env = nullptr;
+    if (cls && g_original && g_vm && g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK)
+        g_original->DeleteLocalRef(env, cls);
+}
+std::string class_metadata(jclass cls) {
+    const auto name = class_name(cls);
+    return name.empty() ? std::string() : ",\"retClassName\":" + esc(name.c_str());
+}
+std::mutex g_member_mu;
+std::unordered_map<jmethodID, std::string> g_method_metadata;
+std::string method_metadata(jmethodID mid) {
+    if (!g_jvmti || !mid) return {};
+    std::lock_guard<std::mutex> guard(g_member_mu);
+    auto it = g_method_metadata.find(mid);
+    if (it != g_method_metadata.end()) return it->second;
+    jclass cls = nullptr;
+    char *name = nullptr, *desc = nullptr;
+    if (g_jvmti->GetMethodDeclaringClass(mid, &cls) != JVMTI_ERROR_NONE) return {};
+    auto owner = class_name(cls);
+    release_class(cls);
+    const auto status = g_jvmti->GetMethodName(mid, &name, &desc, nullptr);
+    std::string out;
+    if (status == JVMTI_ERROR_NONE && name && desc && !owner.empty()) {
+        out = ",\"memberOwner\":" + esc(owner.c_str()) + ",\"memberName\":" + esc(name) + ",\"memberDesc\":" + esc(desc);
+    }
+    if (name) g_jvmti->Deallocate(reinterpret_cast<unsigned char*>(name));
+    if (desc) g_jvmti->Deallocate(reinterpret_cast<unsigned char*>(desc));
+    if (!out.empty()) g_method_metadata[mid] = out;
+    return out;
+}
+std::string field_metadata(jclass lookup_class, jfieldID fid) {
+    if (!g_jvmti || !lookup_class || !fid) return {};
+    jclass cls = nullptr;
+    if (g_jvmti->GetFieldDeclaringClass(lookup_class, fid, &cls) != JVMTI_ERROR_NONE) return {};
+    auto owner = class_name(cls);
+    release_class(cls);
+    char *name = nullptr, *desc = nullptr;
+    const auto status = g_jvmti->GetFieldName(lookup_class, fid, &name, &desc, nullptr);
+    std::string out;
+    if (status == JVMTI_ERROR_NONE && name && desc && !owner.empty())
+        out = ",\"memberOwner\":" + esc(owner.c_str()) + ",\"memberName\":" + esc(name) + ",\"memberDesc\":" + esc(desc);
+    if (name) g_jvmti->Deallocate(reinterpret_cast<unsigned char*>(name));
+    if (desc) g_jvmti->Deallocate(reinterpret_cast<unsigned char*>(desc));
+    return out;
+}
+
 void emit(const std::string& call, const std::string& args, const std::string& ret,
-          jmethodID mid = nullptr, const std::string& ret_str = std::string()) {
+          jmethodID mid = nullptr, const std::string& ret_str = std::string(),
+          const std::string& metadata = std::string()) {
     if (t_suppress_depth > 0) return;
     const bool inframe = in_native_frame();
     // Outside a user native frame we normally stay silent (those JNI calls are
@@ -277,11 +344,23 @@ void emit(const std::string& call, const std::string& args, const std::string& r
             os << ",\"midDesc\":" << esc(desc.c_str());
         }
     }
+    os << method_metadata(mid) << metadata;
     if (!ret_str.empty()) {
         os << ",\"retStr\":" << esc(ret_str.c_str());
     }
     os << "}";
     TraceWriter::instance().write_line(os.str());
+}
+
+std::string returned_class_metadata(jmethodID mid, jobject result) {
+    if (!mid || !result) return {};
+    std::string desc;
+    { std::lock_guard<std::mutex> guard(g_mid_mu);
+      auto it = g_mid_desc.find(mid); if (it != g_mid_desc.end()) desc = it->second; }
+    const std::string suffix = ")Ljava/lang/Class;";
+    if (desc.size() >= suffix.size() && desc.compare(desc.size() - suffix.size(), suffix.size(), suffix) == 0)
+        return class_metadata(static_cast<jclass>(result));
+    return {};
 }
 
 std::string read_jstring(JNIEnv* env, jobject obj);  // defined below
@@ -319,17 +398,17 @@ std::string maybe_track_string_return(JNIEnv* env, jmethodID m, jobject r) {
 jclass JNICALL h_FindClass(JNIEnv* env, const char* name) {
     jclass r = ORIG(FindClass)(env, name);
     std::ostringstream args; args << esc(name);
-    emit("FindClass", args.str(), hex_ptr(r));
+    emit("FindClass", args.str(), hex_ptr(r), nullptr, {}, class_metadata(r));
     return r;
 }
 
-void emit_outside_frame(const std::string& call, const std::string& args, const std::string& ret) {
+void emit_outside_frame(const std::string& call, const std::string& args, const std::string& ret, jmethodID mid = nullptr) {
     std::ostringstream os;
     os << "{\"ev\":\"jni-init\",\"ts\":" << TraceWriter::ts_now()
        << ",\"thr\":" << TraceWriter::tid()
        << ",\"call\":" << esc(call.c_str())
        << ",\"args\":[" << args << "]"
-       << ",\"ret\":" << ret
+       << ",\"ret\":" << ret << method_metadata(mid)
        << "}";
     TraceWriter::instance().write_line(os.str());
 }
@@ -347,9 +426,9 @@ jmethodID JNICALL h_GetMethodID(JNIEnv* env, jclass clazz, const char* name, con
     std::ostringstream args;
     args << hex_ptr(clazz) << "," << esc(name) << "," << esc(sig);
     if (in_native_frame()) {
-        emit("GetMethodID", args.str(), hex_ptr(r));
+        emit("GetMethodID", args.str(), hex_ptr(r), r);
     } else {
-        emit_outside_frame("GetMethodID", args.str(), hex_ptr(r));
+        emit_outside_frame("GetMethodID", args.str(), hex_ptr(r), r);
     }
     return r;
 }
@@ -363,9 +442,9 @@ jmethodID JNICALL h_GetStaticMethodID(JNIEnv* env, jclass clazz, const char* nam
     std::ostringstream args;
     args << hex_ptr(clazz) << "," << esc(name) << "," << esc(sig);
     if (in_native_frame()) {
-        emit("GetStaticMethodID", args.str(), hex_ptr(r));
+        emit("GetStaticMethodID", args.str(), hex_ptr(r), r);
     } else {
-        emit_outside_frame("GetStaticMethodID", args.str(), hex_ptr(r));
+        emit_outside_frame("GetStaticMethodID", args.str(), hex_ptr(r), r);
     }
     return r;
 }
@@ -374,7 +453,7 @@ jfieldID JNICALL h_GetFieldID(JNIEnv* env, jclass clazz, const char* name, const
     jfieldID r = ORIG(GetFieldID)(env, clazz, name, sig);
     std::ostringstream args;
     args << hex_ptr(clazz) << "," << esc(name) << "," << esc(sig);
-    emit("GetFieldID", args.str(), hex_ptr(r));
+    emit("GetFieldID", args.str(), hex_ptr(r), nullptr, {}, field_metadata(clazz, r));
     return r;
 }
 
@@ -382,7 +461,7 @@ jfieldID JNICALL h_GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name,
     jfieldID r = ORIG(GetStaticFieldID)(env, clazz, name, sig);
     std::ostringstream args;
     args << hex_ptr(clazz) << "," << esc(name) << "," << esc(sig);
-    emit("GetStaticFieldID", args.str(), hex_ptr(r));
+    emit("GetStaticFieldID", args.str(), hex_ptr(r), nullptr, {}, field_metadata(clazz, r));
     return r;
 }
 
@@ -557,7 +636,7 @@ WRAP_GET_STATIC_FIELD(jlong,    Long,    "%lld")
             << decode_variadic(m, ap3);                                                       \
         va_end(ap3);                                                                          \
         auto ret_str = maybe_track_string_return(env, m, r);                                  \
-        emit(#kindprefix #jname "Method", args.str(), hex_ptr(r), m, ret_str);                  \
+        emit(#kindprefix #jname "Method", args.str(), hex_ptr(r), m, ret_str, returned_class_metadata(m, r));                  \
         return r;                                                                              \
     }                                                                                          \
     jobject JNICALL h_##kindprefix##jname##MethodA(JNIEnv* env, jobject obj, jmethodID m,    \
@@ -566,7 +645,7 @@ WRAP_GET_STATIC_FIELD(jlong,    Long,    "%lld")
         std::ostringstream args; args << hex_ptr(obj) << "," << hex_ptr(m)                   \
             << decode_array(m, a);                                                            \
         auto ret_str = maybe_track_string_return(env, m, r);                                  \
-        emit(#kindprefix #jname "Method", args.str(), hex_ptr(r), m, ret_str);                  \
+        emit(#kindprefix #jname "Method", args.str(), hex_ptr(r), m, ret_str, returned_class_metadata(m, r));                  \
         return r;                                                                              \
     }
 
@@ -668,7 +747,7 @@ jobject JNICALL h_CallStaticObjectMethodV(JNIEnv* env, jclass c, jmethodID m, va
     std::ostringstream args; args << hex_ptr(c) << "," << hex_ptr(m) << decode_variadic(m, ap3);
     va_end(ap3);
     auto ret_str = maybe_track_string_return(env, m, r);
-    emit("CallStaticObjectMethod", args.str(), hex_ptr(r), m, ret_str);
+    emit("CallStaticObjectMethod", args.str(), hex_ptr(r), m, ret_str, returned_class_metadata(m, r));
     return r;
 }
 jobject JNICALL h_CallStaticObjectMethod(JNIEnv* env, jclass c, jmethodID m, ...) {
@@ -763,14 +842,14 @@ jboolean JNICALL h_IsAssignableFrom(JNIEnv* env, jclass a, jclass b) {
 jclass JNICALL h_GetObjectClass(JNIEnv* env, jobject obj) {
     jclass r = ORIG(GetObjectClass)(env, obj);
     std::ostringstream args; args << hex_ptr(obj);
-    emit("GetObjectClass", args.str(), hex_ptr(r));
+    emit("GetObjectClass", args.str(), hex_ptr(r), nullptr, {}, class_metadata(r));
     return r;
 }
 
 jclass JNICALL h_GetSuperclass(JNIEnv* env, jclass clazz) {
     jclass r = ORIG(GetSuperclass)(env, clazz);
     std::ostringstream args; args << hex_ptr(clazz);
-    emit("GetSuperclass", args.str(), hex_ptr(r));
+    emit("GetSuperclass", args.str(), hex_ptr(r), nullptr, {}, class_metadata(r));
     return r;
 }
 
@@ -906,7 +985,7 @@ jobject JNICALL h_CallNonvirtualObjectMethodV(JNIEnv* env, jobject obj, jclass c
     args << hex_ptr(obj) << "," << hex_ptr(cls) << "," << hex_ptr(m) << decode_variadic(m, ap3);
     va_end(ap3);
     auto ret_str = maybe_track_string_return(env, m, r);
-    emit("CallNonvirtualObjectMethod", args.str(), hex_ptr(r), m, ret_str);
+    emit("CallNonvirtualObjectMethod", args.str(), hex_ptr(r), m, ret_str, returned_class_metadata(m, r));
     return r;
 }
 
@@ -1038,9 +1117,12 @@ void build_hook_table() {
 
 } // namespace
 
+void set_jvmti(jvmtiEnv* env) { g_jvmti = env; }
+
 void capture_original(JNIEnv* env) {
     if (g_original) return;
     g_original = env->functions;
+    g_original->GetJavaVM(env, &g_vm);
     std::call_once(g_build_flag, build_hook_table);
     if (g_string_class == nullptr) {
         jclass local = g_original->FindClass(env, "java/lang/String");
