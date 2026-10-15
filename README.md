@@ -45,6 +45,39 @@ Current architecture, every surface, and default-vs-preview status:
 
 ---
 
+## Filter native tracing by class
+
+This version implements `include` in the native agent. Replace/rebuild the DLL/SO;
+an older agent silently ignores this option. A rebuilt Windows x64 DLL is included
+at `prebuilt/windows/x64/j2c_agent-windows-x64.dll`.
+
+PowerShell (quote the **whole** `-agentpath` argument so `;` reaches Java):
+
+```powershell
+java "-agentpath:C:\c2j\prebuilt\windows\x64\j2c_agent-windows-x64.dll=trace=C:\c2j\trace.jsonl,include=obf.*;native.*" -jar app.jar
+```
+
+Patterns are case-sensitive and separated by `;`. `*` matches any suffix,
+including subpackages; both `obf.*` and `obf/*` match JVM names such as
+`obf/Example`. An exact name matches only that class. Omitted/empty `include`
+keeps the previous unfiltered behavior. `log-all=true` does not override an
+active include filter.
+
+The filter applies to native bind/entry/exit records, JNI calls and exception
+records. JNI calls made by selected native methods are retained even when they
+access JDK classes or other dependencies; this preserves recovery data. Nested
+excluded native calls are suppressed, and selected nested calls resume tracing.
+Exception sites in Java callees of selected native frames may also appear.
+Lifecycle/capability records remain in the trace. The first `agent-loaded` or
+`agent-attached` record reports `include` and `includeActive` so you can confirm
+the newly built agent actually received the option. Use a fresh trace file.
+
+Regression test on Linux with a JDK:
+
+```bash
+python3 native/tests/include-filter/test_filter.py --agent /path/to/j2c_agent.so --headers "$JAVA_HOME/include"
+```
+
 ## Architecture at a glance
 
 ```
@@ -417,47 +450,6 @@ completion on hard targets (see the human-pass note above).
 > — run under that same interpreter, written here as `py/.venv/bin/python`
 > (`py\.venv\Scripts\python` on Windows). If setup fell back to `pip`, use the
 > interpreter it installed into instead.
-
-### Trace selected classes (`include`)
-
-When using an agent build that supports the `include` option, add class patterns
-before starting the JVM to limit tracing to the classes you need and reduce the
-size of `trace.jsonl`. For example, select `obf.*` and `native.*`:
-
-```text
--agentpath:C:\Users\Library\Downloads\j2c_agent-windows-x64.dll=trace=C:\c2j\trace.jsonl,include=obf.*;native.*
-```
-
-Put this entire argument in your launcher's **JVM arguments** field, before the
-main class or `-jar` argument. Replace the DLL and output paths with your actual
-paths, and create `C:\c2j` before launching. The DLL must match the architecture
-of the JVM (`windows-x64` for a Windows x64 JVM).
-
-For a direct PowerShell launch, quote the entire `-agentpath` argument because
-PowerShell treats an unquoted semicolon as a command separator:
-
-```powershell
-New-Item -ItemType Directory -Force 'C:\c2j' | Out-Null
-java '-agentpath:C:\Users\Library\Downloads\j2c_agent-windows-x64.dll=trace=C:\c2j\trace.jsonl,include=obf.*;native.*' -jar 'C:\path\to\target.jar'
-```
-
-| Part | Meaning |
-| --- | --- |
-| `trace=C:\c2j\trace.jsonl` | Output trace file. |
-| `include=obf.*;native.*` | Select classes matching either pattern. |
-| `obf.*` | Classes under the `obf` package prefix. |
-| `native.*` | Classes under the `native` package prefix. |
-| `,` | Separate agent options, such as `trace` and `include`. |
-| `;` | Separate patterns within `include`. |
-
-Filtering narrows what can be recovered from this trace; include every class
-you intend to trace and exercise the required code paths during the run.
-
-**Build compatibility:** The `native/src/agent.cpp` in this source snapshot does
-not parse `include`; it ignores unrecognized options. This example therefore
-requires a DLL built from a version with class-filter support. Adding the
-argument to an older DLL alone will not enable filtering. This README change
-does not add the filtering implementation or provide a rebuilt DLL.
 
 ### Live process attach (preview — opt-in, same-user)
 

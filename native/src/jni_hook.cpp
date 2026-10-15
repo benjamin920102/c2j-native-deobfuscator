@@ -1,5 +1,6 @@
 #include "jni_hook.hpp"
 #include "trace_writer.hpp"
+#include "class_filter.hpp"
 
 #include <atomic>
 #include <cstdarg>
@@ -54,6 +55,7 @@ void register_string(jobject o, std::string s) {
     g_str_content[o] = std::move(s);
 }
 
+thread_local bool t_filter_frame_selected = false;
 thread_local int t_frame_depth = 0;
 thread_local int t_suppress_depth = 0;
 thread_local int t_frame_event_count = 0;   // events emitted within current frame
@@ -306,7 +308,7 @@ std::string field_metadata(jclass lookup_class, jfieldID fid) {
 void emit(const std::string& call, const std::string& args, const std::string& ret,
           jmethodID mid = nullptr, const std::string& ret_str = std::string(),
           const std::string& metadata = std::string()) {
-    if (t_suppress_depth > 0) return;
+    if (t_suppress_depth > 0 || (j2c::class_filter.active() && !t_filter_frame_selected)) return;
     const bool inframe = in_native_frame();
     // Outside a user native frame we normally stay silent (those JNI calls are
     // noise for recovery). The `log-all` agent option opts into logging them.
@@ -403,6 +405,7 @@ jclass JNICALL h_FindClass(JNIEnv* env, const char* name) {
 }
 
 void emit_outside_frame(const std::string& call, const std::string& args, const std::string& ret, jmethodID mid = nullptr) {
+    if (t_suppress_depth > 0 || (j2c::class_filter.active() && !t_filter_frame_selected)) return;
     std::ostringstream os;
     os << "{\"ev\":\"jni-init\",\"ts\":" << TraceWriter::ts_now()
        << ",\"thr\":" << TraceWriter::tid()
@@ -487,6 +490,7 @@ std::string read_jstring(JNIEnv* env, jobject obj) {
 }
 
 void emit_propagate(const char* call, jobject from, jobject to) {
+    if (t_suppress_depth > 0 || (j2c::class_filter.active() && !t_filter_frame_selected)) return;
     if (!in_native_frame() && !g_log_all.load(std::memory_order_relaxed)) return;
     std::ostringstream os;
     os << "{\"ev\":\"jni\",\"ts\":" << TraceWriter::ts_now()
@@ -1141,6 +1145,8 @@ void install(JNIEnv* env) {
     if (!g_hooked) return;
     env->functions = g_hooked;
 }
+
+void set_filter_frame_selected(bool selected) { t_filter_frame_selected = selected; }
 
 void enter_native_frame() {
     ++t_frame_depth;
