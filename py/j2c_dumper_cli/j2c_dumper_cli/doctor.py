@@ -186,7 +186,7 @@ def check_python() -> Check:
 
 
 def venv_python(root: Optional[Path]) -> Optional[Path]:
-    """The uv-managed interpreter under ``py/.venv``, if it exists.
+    """The bundled release interpreter, or uv interpreter under ``py/.venv``.
 
     ``scripts/setup.sh`` runs ``uv sync``, which installs the packages into this
     interpreter — not the system ``python3``. Probes point users at it (via the
@@ -195,6 +195,9 @@ def venv_python(root: Optional[Path]) -> Optional[Path]:
     if root is None:
         return None
     if os.name == "nt":
+        portable = root / "runtime" / "python" / "python.exe"
+        if portable.is_file():
+            return portable
         candidate = root / "py" / ".venv" / "Scripts" / "python.exe"
     else:
         candidate = root / "py" / ".venv" / "bin" / "python"
