@@ -285,7 +285,7 @@ scripts/j2c recover in.jar -o out.jar --run-cmd "java -jar in.jar"
 
 ## Quick start
 
-前置条件：**JDK 17+**（并设置 `JAVA_HOME`）与 **Python 3.11+**。在 Windows 上
+前置条件：**JDK 21+**（并设置 `JAVA_HOME`）与 **Python 3.11+**。在 Windows 上
 构建 native agent 还需要 **Git Bash**（随 Git for Windows 提供）；WSL 会构建出
 Linux 的 `.so`，而不是这里 JVM 加载的 Windows `.dll`。
 第一次上手？请按
@@ -380,7 +380,7 @@ scripts/gui.sh ./work          # Windows：scripts\gui.ps1 .\work
 ```
 
 它展示方法、恢复后的方法体、管线状态，并能运行或只监听 `attach`。
-该模块需要 **JDK 21**；仓库其余部分仍是 JDK 17。详见
+所有 JVM 模块统一使用 **JDK 21**。详见
 [`docs/desktop-gui.md`](docs/desktop-gui.md)。
 
 ### 离线发现与轻量静态（无需运行、无需 Ghidra）
@@ -541,7 +541,7 @@ py/.venv/bin/python -m ast_matcher.cli --list-flags
 
 ```
 ├── scripts/                    j2c / j2c.ps1、setup、gui.sh / gui.ps1
-├── jvm/                        Kotlin/ASM 模块（Gradle；除 desktop-ui 外为 JDK 17）
+├── jvm/                        Kotlin/ASM 模块（Gradle；JDK 21）
 │   ├── jar-parser/             input.jar  → classes.json
 │   ├── trace-to-bytecode/      manifest + trace.jsonl → recovered/*.json
 │   ├── class-rebuilder/        input.jar + recovered/ → output.jar

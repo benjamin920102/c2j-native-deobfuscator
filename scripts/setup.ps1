@@ -36,7 +36,7 @@ function Die($msg)  { Write-Host "error: $msg" -ForegroundColor Red; exit 1 }
 # Preconditions
 # ------------------------------------------------------------------
 if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
-    Die "java not found. Install a JDK 17+ (Temurin/Adoptium) and set JAVA_HOME, then re-run."
+    Die "java not found. Install a JDK 21+ (Temurin/Adoptium) and set JAVA_HOME, then re-run."
 }
 
 # ------------------------------------------------------------------

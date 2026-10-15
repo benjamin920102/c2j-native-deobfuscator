@@ -40,7 +40,7 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # Preconditions
 # ------------------------------------------------------------------
 command -v java >/dev/null 2>&1 || die \
-    "java not found. Install a JDK 17+ (Temurin/Adoptium) and set JAVA_HOME, then re-run."
+    "java not found. Install a JDK 21+ (Temurin/Adoptium) and set JAVA_HOME, then re-run."
 
 # ------------------------------------------------------------------
 # 1. JVM modules

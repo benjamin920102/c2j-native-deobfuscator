@@ -15,39 +15,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          architecture: x64
-          cache: gradle
-
-      - name: Remember JDK 17 path
-        shell: bash
-        run: echo "JDK17=$JAVA_HOME" >> "$GITHUB_ENV"
-
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
           architecture: x64
-
-      - name: Remember JDK 21 path
-        shell: bash
-        run: echo "JDK21=$JAVA_HOME" >> "$GITHUB_ENV"
-
-      - name: Configure Gradle Java toolchains
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.gradle"
-          cat > "$HOME/.gradle/gradle.properties" <<EOF
-          org.gradle.java.installations.auto-detect=true
-          org.gradle.java.installations.auto-download=false
-          org.gradle.java.installations.paths=$JDK17,$JDK21
-          EOF
+          cache: gradle
 
       - name: Build CLI distributions
         working-directory: jvm
@@ -55,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          JAVA_HOME="$JDK17" ./gradlew installDist --no-daemon
+          ./gradlew test installDist --no-daemon -Porg.gradle.java.installations.auto-download=false
 
       - name: Archive original project ZIP
         shell: bash

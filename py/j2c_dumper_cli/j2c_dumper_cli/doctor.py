@@ -24,7 +24,7 @@ STATUS_MISSING = "missing"
 STATUS_WARN = "warn"
 STATUS_OPTIONAL = "optional"
 
-MIN_JAVA = 17
+MIN_JAVA = 21
 MIN_PYTHON = (3, 11)
 
 # The name shown for the Java check; kept in one place so the required

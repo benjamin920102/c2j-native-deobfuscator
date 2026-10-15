@@ -344,7 +344,7 @@ render them.
 
 ## Quick start
 
-Prerequisites: **JDK 17+** (with `JAVA_HOME` set) and **Python 3.11+**. On
+Prerequisites: **JDK 21+** (with `JAVA_HOME` set) and **Python 3.11+**. On
 Windows, building the native agent also needs **Git Bash** (from Git for
 Windows); WSL builds a Linux `.so`, not the Windows `.dll` the JVM loads here.
 New here? Follow the [10-minute getting-started guide](docs/getting-started.md)
@@ -448,8 +448,7 @@ scripts/gui.sh ./work          # Windows: scripts\gui.ps1 .\work
 ```
 
 It shows methods, recovered bodies, pipeline status, and can run or
-listen to `attach`. The module needs **JDK 21**; the rest of the
-repository stays on JDK 17. See [`docs/desktop-gui.md`](docs/desktop-gui.md).
+listen to `attach`. All JVM modules use **JDK 21**. See [`docs/desktop-gui.md`](docs/desktop-gui.md).
 
 ### Offline discovery and static-lite (no live run, no Ghidra)
 
@@ -632,7 +631,7 @@ source**. See [`docs/privileged-observer.md`](docs/privileged-observer.md).
 
 ```
 ├── scripts/                    j2c / j2c.ps1, setup, gui.sh / gui.ps1
-├── jvm/                        Kotlin/ASM modules (Gradle; JDK 17 except desktop-ui)
+├── jvm/                        Kotlin/ASM modules (Gradle; JDK 21)
 │   ├── jar-parser/             input.jar  → classes.json
 │   ├── trace-to-bytecode/      manifest + trace.jsonl → recovered/*.json
 │   ├── class-rebuilder/        input.jar + recovered/ → output.jar
