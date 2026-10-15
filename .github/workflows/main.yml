@@ -19,10 +19,12 @@ jobs:
         include:
           - platform: windows-arm64
             runner: windows-11-arm
+            msvc_arch: amd64_arm64
             arch: arm64
             agent: j2c_agent.dll
           - platform: windows-x64
             runner: windows-2022
+            msvc_arch: amd64
             arch: x64
             agent: j2c_agent.dll
           - platform: ubuntu-arm64
@@ -68,6 +70,24 @@ jobs:
             throw "Git Bash missing under $gitRoot"
           }
           $bashDir >> $env:GITHUB_PATH
+      # Capstone may need a source build on Windows ARM64. Its Python build
+      # uses CMake/NMake, which requires the MSVC environment and target SDK.
+      - name: Set up Windows C/C++ compiler
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+      - name: Check Windows native build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($tool in @('cmake.exe', 'nmake.exe', 'cl.exe', 'link.exe')) {
+            $command = Get-Command $tool -ErrorAction Stop
+            Write-Host "$tool -> $($command.Source)"
+          }
+          if ($env:VSCMD_ARG_TGT_ARCH -ne $env:J2C_ARCH) {
+            throw "MSVC target '$env:VSCMD_ARG_TGT_ARCH' does not match '$env:J2C_ARCH'"
+          }
       - name: Run complete Windows setup
         if: runner.os == 'Windows'
         shell: pwsh

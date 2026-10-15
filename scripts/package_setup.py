@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import stat
 import struct
+import subprocess
 import zipfile
 
 
@@ -29,6 +30,18 @@ def main():
         assert machine == {'x64': 62, 'arm64': 183}[arch], 'Wrong SO architecture'
         python = root / 'py/.venv/bin/python'
     assert python.is_file(), 'Setup did not create the Python environment'
+    # Importing the bindings and disassembling real instructions also loads the
+    # native libraries, catching missing DLLs and wrong-architecture builds.
+    subprocess.run([
+        str(python), '-c',
+        'import capstone, lief; '
+        'x86 = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64); '
+        'arm = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM); '
+        'assert next(x86.disasm(bytes.fromhex("90"), 0)).mnemonic == "nop"; '
+        'assert next(arm.disasm(bytes.fromhex("1f2003d5"), 0)).mnemonic == "nop"; '
+        'print("Native dependencies OK: Capstone", capstone.__version__, '
+        '"/ LIEF", lief.__version__)',
+    ], check=True, cwd=root)
     for module in ('jar-parser', 'class-rebuilder', 'trace-to-bytecode', 'desktop-ui'):
         assert (root / f'jvm/{module}/build/install/{module}/lib').is_dir(), f'Missing JVM distribution: {module}'
     output = Path(os.environ['RUNNER_TEMP']) / 'c2j-packages'
